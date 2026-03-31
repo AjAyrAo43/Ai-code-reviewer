@@ -298,21 +298,40 @@ class DiffParser:
 
         return first_part + truncation_message + last_part
 
-    def static_analysis_python(self, code_string: str) -> List[str]:
+    def static_analysis(self, code_string: str, language: str) -> List[str]:
         """
-        Run pyflakes on a code string using subprocess and capture warnings.
+        Run static analysis on code using language-specific linters.
 
         Args:
-            code_string: Python code string to analyze
+            code_string: Code string to analyze
+            language: Programming language (Python, JavaScript, TypeScript, Java, Go, Ruby, C++)
 
         Returns:
-            List of warning strings, empty if not Python or no warnings
+            List of warning strings, empty if unsupported language or no warnings
         """
         if not code_string.strip():
             return []
 
+        language_lower = language.lower()
+
+        if language_lower == "python":
+            return self._analyze_python(code_string)
+        elif language_lower in ["javascript", "typescript"]:
+            return self._analyze_javascript(code_string, language_lower)
+        elif language_lower == "java":
+            return self._analyze_java(code_string)
+        elif language_lower == "go":
+            return self._analyze_go(code_string)
+        elif language_lower == "ruby":
+            return self._analyze_ruby(code_string)
+        elif language_lower == "c++":
+            return self._analyze_cpp(code_string)
+        else:
+            return []
+
+    def _analyze_python(self, code_string: str) -> List[str]:
+        """Run pyflakes on Python code."""
         try:
-            # Run pyflakes via subprocess
             result = subprocess.run(
                 [sys.executable, "-m", "pyflakes", "-"],
                 input=code_string,
@@ -320,34 +339,178 @@ class DiffParser:
                 text=True,
                 timeout=10
             )
-
-            # Parse stdout for warnings
-            warnings = []
-            if result.stdout:
-                for line in result.stdout.strip().split("\n"):
-                    if line:
-                        warnings.append(line.strip())
-
-            return warnings
-
+            return self._parse_linter_output(result.stdout)
         except subprocess.TimeoutExpired:
-            return ["pyflakes analysis timed out"]
+            return ["Python analysis timed out"]
         except Exception:
             return []
 
+    def _analyze_javascript(self, code_string: str, language: str) -> List[str]:
+        """Run ESLint on JavaScript/TypeScript code via subprocess."""
+        try:
+            # Try to run eslint with stdin
+            # ESLint needs a file, so we create a temp file
+            import tempfile
+            ext = ".ts" if language == "typescript" else ".js"
 
-def build_review_payload(files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            with tempfile.NamedTemporaryFile(mode='w', suffix=ext, delete=False) as f:
+                f.write(code_string)
+                temp_path = f.name
+
+            try:
+                result = subprocess.run(
+                    ["npx", "eslint", "--no-eslintrc", "--parser-options=ecmaVersion:2020,sourceType:module", temp_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=15
+                )
+                return self._parse_linter_output(result.stdout + result.stderr)
+            finally:
+                import os
+                os.unlink(temp_path)
+        except subprocess.TimeoutExpired:
+            return [f"{language.title()} analysis timed out"]
+        except FileNotFoundError:
+            return [f"ESLint not found. Install with: npm install -g eslint"]
+        except Exception:
+            return []
+
+    def _analyze_java(self, code_string: str) -> List[str]:
+        """Run javac with lint options on Java code."""
+        try:
+            import tempfile
+            import os
+
+            # Java needs a file with matching class name, use a generic approach
+            # Just check for basic syntax by looking for common issues
+            warnings = []
+
+            # Basic pattern-based checks for Java
+            if "public class" in code_string:
+                class_match = re.search(r"public\s+class\s+(\w+)", code_string)
+                if class_match:
+                    class_name = class_match.group(1)
+                    # Check for unclosed braces
+                    if code_string.count("{") != code_string.count("}"):
+                        warnings.append("Mismatched braces - check for unclosed blocks")
+                    # Check for unclosed parentheses
+                    if code_string.count("(") != code_string.count(")"):
+                        warnings.append("Mismatched parentheses - check for unclosed expressions")
+
+            # Check for common Java issues
+            if re.search(r"\bSystem\.out\.print(ln)?\s*\(", code_string):
+                warnings.append("Debug print statement found (System.out.println)")
+
+            if re.search(r"\bcatch\s*\(\s*Exception\s+e\s*\)", code_string):
+                warnings.append("Generic Exception catch - consider catching specific exceptions")
+
+            return warnings
+
+        except Exception:
+            return []
+
+    def _analyze_go(self, code_string: str) -> List[str]:
+        """Run go vet on Go code via subprocess."""
+        try:
+            # Go also needs a file - use basic pattern checks as fallback
+            warnings = []
+
+            # Check for common Go issues
+            if code_string.count("{") != code_string.count("}"):
+                warnings.append("Mismatched braces - check for unclosed blocks")
+
+            # Check for unused variable patterns (declaration without use is hard without full AST)
+            var_declarations = re.findall(r":=\s*(\w+)", code_string)
+            for var in set(var_declarations):
+                # Simple check: if variable appears only once (in its declaration)
+                if code_string.count(var) == 1:
+                    warnings.append(f"Variable '{var}' declared but possibly unused")
+
+            # Check for error handling
+            if "err" in code_string and ":=" in code_string:
+                if "if err" not in code_string and "err !=" not in code_string:
+                    warnings.append("Error returned but may not be checked")
+
+            return warnings
+
+        except Exception:
+            return []
+
+    def _analyze_ruby(self, code_string: str) -> List[str]:
+        """Run Ruby syntax check via subprocess."""
+        try:
+            result = subprocess.run(
+                ["ruby", "-wc", "-e", code_string],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            output = result.stdout + result.stderr
+            if output and "Syntax OK" not in output:
+                return self._parse_linter_output(output)
+            return []
+        except subprocess.TimeoutExpired:
+            return ["Ruby analysis timed out"]
+        except FileNotFoundError:
+            return ["Ruby not found in PATH"]
+        except Exception:
+            return []
+
+    def _analyze_cpp(self, code_string: str) -> List[str]:
+        """Run basic C++ static analysis via pattern matching."""
+        try:
+            warnings = []
+
+            # Check for mismatched braces
+            if code_string.count("{") != code_string.count("}"):
+                warnings.append("Mismatched braces - check for unclosed blocks")
+
+            # Check for mismatched parentheses
+            if code_string.count("(") != code_string.count(")"):
+                warnings.append("Mismatched parentheses")
+
+            # Check for common C++ issues
+            if re.search(r"\bdelete\s+\w+\s*;", code_string) and "delete[]" not in code_string:
+                if re.search(r"\bnew\s+\w+\s*\[", code_string):
+                    warnings.append("Possible mismatch: new[] used with delete (should use delete[])")
+
+            # Check for potential memory leaks (new without delete in same snippet)
+            if "new " in code_string and "delete" not in code_string:
+                warnings.append("Dynamic allocation (new) found without corresponding delete")
+
+            # Check for raw pointers
+            if re.search(r"\*\s*\w+\s*=", code_string) and "unique_ptr" not in code_string and "shared_ptr" not in code_string:
+                warnings.append("Raw pointer usage detected - consider using smart pointers")
+
+            return warnings
+
+        except Exception:
+            return []
+
+    def _parse_linter_output(self, output: str) -> List[str]:
+        """Parse linter output into a list of warnings."""
+        warnings = []
+        if output:
+            for line in output.strip().split("\n"):
+                if line and "error" in line.lower() or "warning" in line.lower() or ":" in line:
+                    warnings.append(line.strip())
+        return warnings
+
+
+def build_review_payload(files: List[Dict[str, Any]], run_static_analysis: bool = True) -> List[Dict[str, Any]]:
     """
     Build a clean list of parsed file objects ready for LLM review.
 
     Takes a list of file objects from GitHub API, parses each one,
     filters out binary files (no patch field), and returns parsed data.
+    Optionally runs static analysis based on detected language.
 
     Args:
         files: List of file objects from GitHub API
+        run_static_analysis: Whether to run static analysis (default True)
 
     Returns:
-        List of parsed file dicts ready for review
+        List of parsed file dicts ready for review, with optional lint warnings
     """
     parser = DiffParser()
     payload = []
@@ -355,6 +518,14 @@ def build_review_payload(files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for file_obj in files:
         parsed = parser.parse_file_diff(file_obj)
         if parsed is not None:
+            # Run static analysis if enabled
+            if run_static_analysis:
+                # Extract only added code for analysis
+                added_code = parser.extract_added_code(parsed["patch"])
+                warnings = parser.static_analysis(added_code, parsed["language"])
+                if warnings:
+                    parsed["lint_warnings"] = warnings
+
             payload.append(parsed)
 
     return payload

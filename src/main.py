@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 from github_client import GitHubClient
 from reviewer import CodeReviewer
-from parser import DiffParser
+from parser import DiffParser, build_review_payload
 from commenter import PRCommenter
 
 
@@ -39,11 +39,12 @@ def main():
     files = github_client.get_pr_files(pr_number)
     diff = github_client.get_pr_diff(pr_number)
 
-    # Parse the diff
+    # Parse the diff and run static analysis
     parsed_diff = diff_parser.parse(diff)
+    files_with_analysis = build_review_payload(files, run_static_analysis=True)
 
-    # Review the code
-    review = reviewer.review(parsed_diff, pr_data)
+    # Review the code (pass both parsed diff and static analysis results)
+    review = reviewer.review(parsed_diff, pr_data, files_with_analysis)
 
     # Post comments
     commenter.post_comments(pr_number, review)
