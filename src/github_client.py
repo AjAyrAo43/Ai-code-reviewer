@@ -3,7 +3,7 @@ GitHub Client - Handles interactions with the GitHub API.
 """
 
 import requests
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 
 class GitHubClient:
@@ -25,34 +25,25 @@ class GitHubClient:
             "Accept": "application/vnd.github.v3+json",
         }
 
-    def _get(self, endpoint: str) -> Dict[str, Any]:
+    def _get(self, endpoint: str) -> Optional[Dict[str, Any]]:
         """Make a GET request to the GitHub API."""
         url = f"{self.base_url}{endpoint}"
         response = requests.get(url, headers=self.headers)
-        response.raise_for_status()
+        if response.status_code != 200:
+            print(f"GitHub API GET error: {response.status_code} - {response.text}")
+            return None
         return response.json()
 
-    def _post(self, endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    def _post(self, endpoint: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Make a POST request to the GitHub API."""
         url = f"{self.base_url}{endpoint}"
         response = requests.post(url, headers=self.headers, json=data)
-        response.raise_for_status()
+        if response.status_code != 200:
+            print(f"GitHub API POST error: {response.status_code} - {response.text}")
+            return None
         return response.json()
 
-    def get_pr(self, pr_number: int) -> Dict[str, Any]:
-        """
-        Fetch pull request details.
-
-        Args:
-            pr_number: The pull request number
-
-        Returns:
-            PR data including title, description, and state
-        """
-        endpoint = f"/repos/{self.owner}/{self.repo_name}/pulls/{pr_number}"
-        return self._get(endpoint)
-
-    def get_pr_files(self, pr_number: int) -> List[Dict[str, Any]]:
+    def get_pr_files(self, pr_number: int) -> Optional[List[Dict[str, Any]]]:
         """
         Fetch files changed in a pull request.
 
@@ -60,31 +51,53 @@ class GitHubClient:
             pr_number: The pull request number
 
         Returns:
-            List of changed files with metadata
+            List of changed files with metadata (filename, status, additions, deletions, patch)
         """
         endpoint = f"/repos/{self.owner}/{self.repo_name}/pulls/{pr_number}/files"
         return self._get(endpoint)
 
-    def get_pr_diff(self, pr_number: int) -> str:
+    def get_pr_info(self, pr_number: int) -> Optional[Dict[str, Any]]:
         """
-        Fetch the raw diff of a pull request.
+        Fetch pull request information.
 
         Args:
             pr_number: The pull request number
 
         Returns:
-            Raw diff string
+            Dict with title, body, head commit SHA, and base branch
         """
         endpoint = f"/repos/{self.owner}/{self.repo_name}/pulls/{pr_number}"
-        url = f"{self.base_url}{endpoint}"
-        headers = {**self.headers, "Accept": "application/vnd.github.v3.diff"}
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.text
+        data = self._get(endpoint)
+        if data is None:
+            return None
+        return {
+            "title": data.get("title"),
+            "body": data.get("body"),
+            "head_sha": data.get("head", {}).get("sha"),
+            "base_branch": data.get("base", {}).get("ref"),
+        }
 
-    def post_comment(self, pr_number: int, commit_sha: str, path: str, line: int, body: str) -> Dict[str, Any]:
+    def get_pr_commits(self, pr_number: int) -> Optional[str]:
         """
-        Post an inline comment on a pull request.
+        Fetch commits in a pull request and return the latest commit SHA.
+
+        Args:
+            pr_number: The pull request number
+
+        Returns:
+            Latest commit SHA
+        """
+        endpoint = f"/repos/{self.owner}/{self.repo_name}/pulls/{pr_number}/commits"
+        commits = self._get(endpoint)
+        if commits is None or len(commits) == 0:
+            return None
+        return commits[-1].get("sha")
+
+    def post_review_comment(
+        self, pr_number: int, commit_sha: str, path: str, line: int, body: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Post an inline review comment on a specific file line.
 
         Args:
             pr_number: The pull request number
@@ -102,20 +115,69 @@ class GitHubClient:
             "commit_id": commit_sha,
             "path": path,
             "line": line,
+            "side": "RIGHT",
         }
         return self._post(endpoint, data)
 
-    def post_review_comment(self, pr_number: int, body: str) -> Dict[str, Any]:
+    def post_pr_summary(self, pr_number: int, body: str) -> Optional[Dict[str, Any]]:
         """
-        Post a general comment on a pull request review.
+        Post an overall summary comment on the PR.
 
         Args:
             pr_number: The pull request number
-            body: Comment body
+            body: Summary comment body
 
         Returns:
             Created comment data
         """
-        endpoint = f"/repos/{self.owner}/{self.repo_name}/pulls/{pr_number}/comments"
+        endpoint = f"/repos/{self.owner}/{self.repo_name}/issues/{pr_number}/comments"
         data = {"body": body}
         return self._post(endpoint, data)
+
+    def create_review(
+        self,
+        pr_number: int,
+        commit_sha: str,
+        comments: List[Dict[str, Any]],
+        action: str = "COMMENT",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Create a pull request review with inline comments.
+
+        Args:
+            pr_number: The pull request number
+            commit_sha: The commit SHA for the review
+            comments: List of comment dicts with path, line, body
+            action: Review action (COMMENT, APPROVE, REQUEST_CHANGES)
+
+        Returns:
+            Created review data
+        """
+        endpoint = f"/repos/{self.owner}/{self.repo_name}/pulls/{pr_number}/reviews"
+        data = {
+            "commit_id": commit_sha,
+            "event": action,
+            "comments": comments,
+        }
+        return self._post(endpoint, data)
+
+    def get_file_content(self, path: str, ref: str = "HEAD") -> Optional[str]:
+        """
+        Fetch raw file content for AST parsing.
+
+        Args:
+            path: File path in the repository
+            ref: Git reference (branch, tag, or SHA)
+
+        Returns:
+            Raw file content as string
+        """
+        endpoint = f"/repos/{self.owner}/{self.repo_name}/contents/{path}"
+        url = f"{self.base_url}{endpoint}"
+        params = {"ref": ref}
+        response = requests.get(url, headers=self.headers, params=params)
+        if response.status_code != 200:
+            print(f"GitHub API GET file error: {response.status_code} - {response.text}")
+            return None
+        data = response.json()
+        return data.get("content", "")
