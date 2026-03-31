@@ -3,6 +3,8 @@ Diff Parser - Parses git diffs and performs AST analysis.
 """
 
 import re
+import subprocess
+import sys
 from typing import Dict, List, Any, Optional
 from pyflakes.api import check
 from pyflakes.messages import Message
@@ -149,3 +151,210 @@ class DiffParser:
             pass
 
         return result
+
+    def parse_file_diff(self, file_obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Parse a GitHub file object from the API into a structured dict.
+
+        Args:
+            file_obj: Dict with filename, patch, status fields from GitHub API
+
+        Returns:
+            Dict with parsed diff data, or None if no patch field (binary file)
+        """
+        if "patch" not in file_obj:
+            return None
+
+        filename = file_obj.get("filename", "unknown")
+        patch = file_obj.get("patch", "")
+        status = file_obj.get("status", "modified")
+
+        # Detect language from extension
+        ext_map = {
+            ".py": "Python",
+            ".js": "JavaScript",
+            ".ts": "TypeScript",
+            ".java": "Java",
+            ".go": "Go",
+            ".rb": "Ruby",
+            ".cpp": "C++",
+        }
+        ext = "." + filename.split(".")[-1] if "." in filename else ""
+        language = ext_map.get(ext, "Unknown")
+
+        # Parse line numbers from patch
+        line_number_map = self.parse_line_numbers(patch)
+
+        # Extract added and removed lines
+        added_lines = []
+        removed_lines = []
+        current_added_pos = 0
+        current_removed_pos = 0
+
+        for line in patch.split("\n"):
+            if line.startswith("+") and not line.startswith("+++"):
+                current_added_pos += 1
+                actual_line = line_number_map.get(current_added_pos)
+                added_lines.append({
+                    "line_number": actual_line,
+                    "content": line[1:]
+                })
+            elif line.startswith("-") and not line.startswith("---"):
+                current_removed_pos += 1
+                removed_lines.append({
+                    "line_number": current_removed_pos,
+                    "content": line[1:]
+                })
+
+        # Extract chunk header (@@ line numbers @@)
+        chunk_header = None
+        header_match = re.search(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", patch, re.MULTILINE)
+        if header_match:
+            chunk_header = header_match.group(0)
+
+        return {
+            "filename": filename,
+            "language": language,
+            "status": status,
+            "patch": patch,
+            "added_lines": added_lines,
+            "removed_lines": removed_lines,
+            "chunk_header": chunk_header,
+        }
+
+    def parse_line_numbers(self, patch: str) -> Dict[int, int]:
+        """
+        Parse diff patch to build a map from diff position to actual file line number.
+
+        The @@ -a,b +c,d @@ header tells you where lines start.
+        Returns a dict {position: actual_line_number} for added lines only.
+
+        Args:
+            patch: Raw diff patch string
+
+        Returns:
+            Dict mapping position in added lines to actual file line number
+        """
+        line_map = {}
+        added_pos = 0
+        current_new_line = 0
+
+        for line in patch.split("\n"):
+            # Parse hunk header
+            header_match = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            if header_match:
+                current_new_line = int(header_match.group(1)) - 1
+                continue
+
+            # Track added lines
+            if line.startswith("+") and not line.startswith("+++"):
+                added_pos += 1
+                current_new_line += 1
+                line_map[added_pos] = current_new_line
+
+        return line_map
+
+    def extract_added_code(self, patch: str) -> str:
+        """
+        Extract only added lines from a diff patch.
+
+        Args:
+            patch: Raw diff patch string
+
+        Returns:
+            String of added lines with line numbers prepended
+        """
+        added_lines = []
+        line_num = 0
+
+        for line in patch.split("\n"):
+            if line.startswith("+") and not line.startswith("+++"):
+                line_num += 1
+                added_lines.append(f"{line_num}: {line[1:]}")
+
+        return "\n".join(added_lines)
+
+    def truncate_diff(self, patch: str, max_chars: int = 8000) -> str:
+        """
+        Truncate a diff patch if it exceeds max_chars.
+
+        Keeps first 4000 and last 4000 chars with a truncation message in between.
+
+        Args:
+            patch: Raw diff patch string
+            max_chars: Maximum character limit (default 8000)
+
+        Returns:
+            Truncated patch string
+        """
+        if len(patch) <= max_chars:
+            return patch
+
+        half_size = max_chars // 2
+        truncation_message = "\n\n[... diff truncated ...]\n\n"
+
+        first_part = patch[:half_size]
+        last_part = patch[-half_size:]
+
+        return first_part + truncation_message + last_part
+
+    def static_analysis_python(self, code_string: str) -> List[str]:
+        """
+        Run pyflakes on a code string using subprocess and capture warnings.
+
+        Args:
+            code_string: Python code string to analyze
+
+        Returns:
+            List of warning strings, empty if not Python or no warnings
+        """
+        if not code_string.strip():
+            return []
+
+        try:
+            # Run pyflakes via subprocess
+            result = subprocess.run(
+                [sys.executable, "-m", "pyflakes", "-"],
+                input=code_string,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            # Parse stdout for warnings
+            warnings = []
+            if result.stdout:
+                for line in result.stdout.strip().split("\n"):
+                    if line:
+                        warnings.append(line.strip())
+
+            return warnings
+
+        except subprocess.TimeoutExpired:
+            return ["pyflakes analysis timed out"]
+        except Exception:
+            return []
+
+
+def build_review_payload(files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Build a clean list of parsed file objects ready for LLM review.
+
+    Takes a list of file objects from GitHub API, parses each one,
+    filters out binary files (no patch field), and returns parsed data.
+
+    Args:
+        files: List of file objects from GitHub API
+
+    Returns:
+        List of parsed file dicts ready for review
+    """
+    parser = DiffParser()
+    payload = []
+
+    for file_obj in files:
+        parsed = parser.parse_file_diff(file_obj)
+        if parsed is not None:
+            payload.append(parsed)
+
+    return payload
