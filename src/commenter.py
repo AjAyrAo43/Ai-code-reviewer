@@ -1,13 +1,31 @@
 """
-PR Commenter - Posts inline comments on GitHub PRs.
+PR Commenter - Posts review results to GitHub PRs with inline and summary comments.
 """
 
-from typing import Dict, List, Any
+import time
+from typing import Dict, List, Any, Tuple
 from github_client import GitHubClient
 
 
 class PRCommenter:
-    """Handles posting comments on pull requests."""
+    """Handles posting code review results on GitHub pull requests."""
+
+    # Severity indicators
+    SEVERITY_ICONS = {
+        "critical": "❌",
+        "warning": "⚠️",
+        "info": "ℹ️",
+    }
+
+    # Issue type badges
+    TYPE_BADGES = {
+        "bug": "bug",
+        "security": "security",
+        "performance": "performance",
+        "style": "style",
+        "maintainability": "maintainability",
+        "best-practice": "best-practice",
+    }
 
     def __init__(self, github_client: GitHubClient):
         """
@@ -18,79 +36,216 @@ class PRCommenter:
         """
         self.github_client = github_client
 
-    def post_comments(
-        self, pr_number: int, review: Dict[str, Any]
+    def format_comment(self, issue: Dict[str, Any]) -> str:
+        """
+        Format a single issue dict into a clean GitHub comment string.
+
+        Args:
+            issue: Dict with keys: severity, type, message, suggestion
+
+        Returns:
+            Formatted comment string
+        """
+        severity = issue.get("severity", "info").lower()
+        issue_type = issue.get("type", "issue").lower()
+        message = issue.get("message", "")
+        suggestion = issue.get("suggestion", "")
+
+        # Get icon for severity
+        icon = self.SEVERITY_ICONS.get(severity, "ℹ️")
+
+        # Get badge for issue type
+        badge = self.TYPE_BADGES.get(issue_type, issue_type)
+
+        # Build the comment
+        lines = [
+            f"{icon} **[{severity.upper()}] {issue_type.replace('-', ' ').title()}**",
+            "",
+            message,
+        ]
+
+        if suggestion:
+            lines.append("")
+            lines.append(f"> Suggestion: {suggestion}")
+
+        return "\n".join(lines)
+
+    def build_review_batch(
+        self, all_results: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
-        Post all review comments to a pull request.
+        Convert all review results into GitHub review API format.
+
+        Args:
+            all_results: List of {filename, issues, summary, score} dicts
+
+        Returns:
+            List of {path, line, body} dicts for GitHub API
+        """
+        batch = []
+
+        for result in all_results:
+            filename = result.get("filename", "")
+            issues = result.get("issues", [])
+
+            for issue in issues:
+                line = issue.get("line")
+
+                # Skip issues without valid line numbers
+                if line is None or line <= 0:
+                    continue
+
+                comment_body = self.format_comment(issue)
+
+                batch.append({
+                    "path": filename,
+                    "line": line,
+                    "body": comment_body,
+                })
+
+        return batch
+
+    def post_inline_comments(
+        self,
+        pr_number: int,
+        commit_sha: str,
+        filename: str,
+        issues: List[Dict[str, Any]],
+        line_map: Dict[int, int] = None,
+    ) -> int:
+        """
+        Post inline comments for issues on specific lines.
 
         Args:
             pr_number: The pull request number
-            review: Review data from CodeReviewer
+            commit_sha: The commit SHA to comment on
+            filename: The file path
+            issues: List of issue dicts with line numbers
+            line_map: Optional mapping of diff line to actual file line
 
         Returns:
-            List of posted comments
+            Number of comments successfully posted
         """
-        posted_comments = []
+        posted_count = 0
 
-        # Post inline comments for specific lines
-        inline_comments = review.get("inline_comments", [])
-        for comment in inline_comments:
-            try:
-                # Get the commit SHA (using PR head for simplicity)
-                pr_data = self.github_client.get_pr(pr_number)
-                commit_sha = pr_data["head"]["sha"]
+        for issue in issues:
+            line = issue.get("line")
 
-                result = self.github_client.post_comment(
-                    pr_number=pr_number,
-                    commit_sha=commit_sha,
-                    path=comment["file"],
-                    line=comment["line"],
-                    body=comment["comment"],
-                )
-                posted_comments.append(result)
-            except Exception as e:
-                print(f"Failed to post inline comment: {e}")
+            # Skip if line number is invalid
+            if line is None or line <= 0:
+                continue
 
-        # Post summary comment if there are issues or suggestions
-        issues = review.get("issues", [])
-        suggestions = review.get("suggestions", [])
-        overall = review.get("overall_assessment", "")
+            # Apply line mapping if provided
+            if line_map and line in line_map:
+                actual_line = line_map[line]
+            else:
+                actual_line = line
 
-        if issues or suggestions or overall:
-            summary = self._build_summary(review)
+            # Skip if mapped line is still invalid
+            if actual_line <= 0:
+                continue
+
+            comment_body = self.format_comment(issue)
+
             try:
                 result = self.github_client.post_review_comment(
                     pr_number=pr_number,
-                    body=summary,
+                    commit_sha=commit_sha,
+                    path=filename,
+                    line=actual_line,
+                    body=comment_body,
                 )
-                posted_comments.append(result)
+
+                if result:
+                    posted_count += 1
             except Exception as e:
-                print(f"Failed to post summary comment: {e}")
+                print(f"Failed to post inline comment on {filename}:{actual_line}: {e}")
 
-        return posted_comments
+            # Rate limiting delay
+            time.sleep(0.5)
 
-    def _build_summary(self, review: Dict[str, Any]) -> str:
-        """Build a summary comment from the review."""
-        lines = []
+        return posted_count
 
-        overall = review.get("overall_assessment", "")
-        if overall:
-            lines.append("## Code Review Summary\n")
-            lines.append(overall)
-            lines.append("")
+    def post_full_review(
+        self,
+        pr_number: int,
+        commit_sha: str,
+        all_results: List[Dict[str, Any]],
+        summary_text: str,
+    ) -> Dict[str, Any]:
+        """
+        Post a complete code review with inline comments and summary.
 
-        issues = review.get("issues", [])
-        if issues:
-            lines.append("### Issues Found\n")
+        Args:
+            pr_number: The pull request number
+            commit_sha: The commit SHA for the review
+            all_results: List of {filename, issues, summary, score} dicts
+            summary_text: Overall review summary markdown
+
+        Returns:
+            Report dict with totals and breakdown
+        """
+        # Collect statistics
+        total_files = len(all_results)
+        total_issues = 0
+        severity_breakdown = {"critical": 0, "warning": 0, "info": 0}
+        has_critical = False
+
+        for result in all_results:
+            issues = result.get("issues", [])
+            total_issues += len(issues)
+
             for issue in issues:
-                lines.append(f"- {issue}")
-            lines.append("")
+                severity = issue.get("severity", "info").lower()
+                if severity in severity_breakdown:
+                    severity_breakdown[severity] += 1
+                if severity == "critical":
+                    has_critical = True
 
-        suggestions = review.get("suggestions", [])
-        if suggestions:
-            lines.append("### Suggestions\n")
-            for suggestion in suggestions:
-                lines.append(f"- {suggestion}")
+        # Determine review action
+        action = "REQUEST_CHANGES" if has_critical else "COMMENT"
 
-        return "\n".join(lines)
+        # Build the batch of inline comments
+        inline_batch = self.build_review_batch(all_results)
+
+        # Submit the review with inline comments
+        review_result = None
+        if inline_batch:
+            try:
+                review_result = self.github_client.create_review(
+                    pr_number=pr_number,
+                    commit_sha=commit_sha,
+                    comments=inline_batch,
+                    action=action,
+                )
+                if review_result:
+                    print(f"Review submitted with {len(inline_batch)} inline comments")
+            except Exception as e:
+                print(f"Failed to create review: {e}")
+                review_result = None
+
+        # Post the summary comment
+        summary_result = None
+        try:
+            summary_result = self.github_client.post_pr_summary(
+                pr_number=pr_number,
+                body=summary_text,
+            )
+            if summary_result:
+                print(f"Summary comment posted")
+        except Exception as e:
+            print(f"Failed to post summary: {e}")
+            summary_result = None
+
+        # Build the report
+        report = {
+            "total_files_reviewed": total_files,
+            "total_issues_found": total_issues,
+            "severity_breakdown": severity_breakdown,
+            "inline_comments_posted": len(inline_batch),
+            "review_action": action,
+            "review_submitted": review_result is not None,
+            "summary_posted": summary_result is not None,
+        }
+
+        return report
