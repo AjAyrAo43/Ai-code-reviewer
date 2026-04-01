@@ -36,9 +36,18 @@ class GitHubClient:
 
     def _post(self, endpoint: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Make a POST request to the GitHub API."""
+        import json
         url = f"{self.base_url}{endpoint}"
-        response = requests.post(url, headers=self.headers, json=data)
-        if response.status_code != 200:
+        # Use json.dumps with ensure_ascii=False to preserve emojis/Unicode
+        json_data = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        post_headers = {
+            "Authorization": self.headers["Authorization"],
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        response = requests.post(url, headers=post_headers, data=json_data)
+        # GitHub returns 201 Created for successful POST requests
+        if response.status_code not in [200, 201]:
             print(f"GitHub API POST error: {response.status_code} - {response.text}")
             return None
         return response.json()

@@ -7,6 +7,12 @@ Supports multiple programming languages with language-specific static analysis.
 
 import os
 import sys
+import io
+
+# Set UTF-8 encoding for Windows console to support emojis
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+
 from dotenv import load_dotenv
 
 from github_client import GitHubClient

@@ -203,7 +203,9 @@ class PRCommenter:
                     has_critical = True
 
         # Determine review action
-        action = "REQUEST_CHANGES" if has_critical else "COMMENT"
+        # Note: GitHub blocks REQUEST_CHANGES on your own PR, so we use COMMENT
+        # and indicate severity in the summary instead
+        action = "COMMENT"
 
         # Build the batch of inline comments
         inline_batch = self.build_review_batch(all_results)
