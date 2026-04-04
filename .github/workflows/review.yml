@@ -31,6 +31,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          ls -la ai-code-reviewer/
           pip install -r ai-code-reviewer/requirements.txt
 
       - name: Run AI Code Review
