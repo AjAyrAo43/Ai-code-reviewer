@@ -13,8 +13,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout target repo
         uses: actions/checkout@v4
+        with:
+          path: target-repo
+
+      - name: Checkout AI Code Reviewer
+        uses: actions/checkout@v4
+        with:
+          repository: AjAyrAo43/Ai-code-reviewer
+          path: ai-code-reviewer
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -23,17 +31,17 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install -r ai-code-reviewer/requirements.txt
 
       - name: Run AI Code Review
         id: review
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GIT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          python src/main.py
+          python ai-code-reviewer/src/main.py
 
       - name: Post fallback comment on failure
         if: failure() && steps.review.conclusion == 'failure'
