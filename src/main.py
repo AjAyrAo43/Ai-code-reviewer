@@ -207,12 +207,33 @@ def main():
         if report.get("review_submitted"):
             print(f"      Review submitted with {report.get('inline_comments_posted', 0)} inline comments")
         else:
-            print("      WARNING: Review submission failed")
+            print("      WARNING: Review submission failed (check GITHUB_TOKEN permissions)")
 
         if report.get("summary_posted"):
             print("      Summary comment posted")
         else:
-            print("      WARNING: Summary submission failed")
+            print("      WARNING: Summary submission failed (check GITHUB_TOKEN permissions)")
+
+        if not report.get("summary_posted") or not report.get("review_submitted"):
+            print("\n" + "=" * 60)
+            print("GENERATED PR SUMMARY & REVIEW FINDINGS (LOCAL OUTPUT)")
+            print("=" * 60)
+            print(summary_text)
+            print("\n" + "-" * 60)
+            print("DETAILED INLINE ISSUES DETECTED:")
+            print("-" * 60)
+            for res in review_results:
+                fname = res.get("filename")
+                for issue in res.get("issues", []):
+                    line = issue.get("line")
+                    sev = issue.get("severity", "info").upper()
+                    msg = issue.get("message")
+                    sug = issue.get("suggestion", "")
+                    print(f"\n  [{sev}] {fname}:{line}")
+                    print(f"    Message:    {msg}")
+                    if sug:
+                        print(f"    Suggestion: {sug}")
+            print("=" * 60)
 
         # =========================================================================
         # STEP 9: Final report and exit code

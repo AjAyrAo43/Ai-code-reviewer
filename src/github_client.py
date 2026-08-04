@@ -29,6 +29,10 @@ class GitHubClient:
         """Make a GET request to the GitHub API."""
         url = f"{self.base_url}{endpoint}"
         response = requests.get(url, headers=self.headers)
+        if response.status_code == 401:
+            # Fallback to unauthenticated request for public repositories if token is invalid/expired
+            headers_no_auth = {k: v for k, v in self.headers.items() if k != "Authorization"}
+            response = requests.get(url, headers=headers_no_auth)
         if response.status_code != 200:
             print(f"GitHub API GET error: {response.status_code} - {response.text}")
             return None
