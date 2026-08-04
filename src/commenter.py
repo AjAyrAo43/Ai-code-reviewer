@@ -222,6 +222,22 @@ class PRCommenter:
                 )
                 if review_result:
                     print(f"Review submitted with {len(inline_batch)} inline comments")
+                else:
+                    # Fallback to individual inline comments if batch posting failed (e.g. 422 unresolvable line)
+                    print("      Batch review failed; falling back to individual inline comment posting...")
+                    posted_count = 0
+                    for res in all_results:
+                        fname = res.get("filename", "")
+                        issues = res.get("issues", [])
+                        if fname and issues:
+                            posted_count += self.post_inline_comments(
+                                pr_number=pr_number,
+                                commit_sha=commit_sha,
+                                filename=fname,
+                                issues=issues,
+                            )
+                    print(f"      Fallback inline comments posted: {posted_count}")
+                    review_result = {"posted_count": posted_count}
             except Exception as e:
                 print(f"Failed to create review: {e}")
                 review_result = None
